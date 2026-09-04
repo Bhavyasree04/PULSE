@@ -3,7 +3,9 @@ import type { Change, Quote } from './domain.js';
 
 export const schema = `
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE TABLE IF NOT EXISTS users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), email text NOT NULL UNIQUE, password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), email text NOT NULL UNIQUE, username text UNIQUE, password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique ON users(username) WHERE username IS NOT NULL;
 CREATE TABLE IF NOT EXISTS watchlists (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, name text NOT NULL DEFAULT 'My watchlist', created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,name));
 CREATE TABLE IF NOT EXISTS watchlist_items (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), watchlist_id uuid NOT NULL REFERENCES watchlists(id) ON DELETE CASCADE, symbol varchar(20) NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(watchlist_id,symbol));
 CREATE TABLE IF NOT EXISTS market_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, symbol varchar(20) NOT NULL, price numeric(14,2) NOT NULL, volume bigint, volatility numeric(10,4), observed_at timestamptz NOT NULL DEFAULT now(), market_updated_at timestamptz NOT NULL, source text NOT NULL, freshness_status text NOT NULL CHECK(freshness_status IN ('fresh','stale','unavailable')));
@@ -11,13 +13,13 @@ CREATE INDEX IF NOT EXISTS market_snapshots_user_symbol_time ON market_snapshots
 CREATE TABLE IF NOT EXISTS change_events (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, symbol varchar(20) NOT NULL, previous_snapshot_id uuid REFERENCES market_snapshots(id) ON DELETE SET NULL, current_snapshot_id uuid REFERENCES market_snapshots(id) ON DELETE SET NULL, price_change numeric(14,2), percentage_change numeric(10,4), volume_change numeric(10,4), volatility_change numeric(10,4), change_score integer NOT NULL CHECK(change_score BETWEEN 0 AND 100), significance_level text NOT NULL CHECK(significance_level IN ('NORMAL','MODERATE','SIGNIFICANT')), explanation text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS change_events_user_symbol_time ON change_events(user_id,symbol,created_at DESC);`;
 
-type User={id:string;email:string;passwordHash:string};
+type User={id:string;email:string;username?:string;passwordHash:string};
 function rowQuote(r:any):Quote{return {symbol:r.symbol,name:r.name??r.symbol,price:Number(r.price),volume:r.volume===null?undefined:Number(r.volume),volatility:r.volatility===null?undefined:Number(r.volatility),updatedAt:new Date(r.market_updated_at).toISOString(),status:r.freshness_status};}
 export class PostgresRepository {
   pool:Pool; constructor(url:string){this.pool=new Pool({connectionString:url,ssl:process.env.PGSSL==='false'?false:{rejectUnauthorized:false}})}
   async migrate(){await this.pool.query(schema)} async close(){await this.pool.end()}
-  async createUser(email:string,passwordHash:string):Promise<User>{const r=await this.pool.query('INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id,email,password_hash',[email,passwordHash]);return {id:r.rows[0].id,email:r.rows[0].email,passwordHash:r.rows[0].password_hash}}
-  async findUser(email:string):Promise<User|undefined>{const r=await this.pool.query('SELECT id,email,password_hash FROM users WHERE email=$1',[email]);return r.rowCount?{id:r.rows[0].id,email:r.rows[0].email,passwordHash:r.rows[0].password_hash}:undefined}
+  async createUser(email:string,username:string,passwordHash:string):Promise<User>{const r=await this.pool.query('INSERT INTO users(email,username,password_hash) VALUES($1,$2,$3) RETURNING id,email,username,password_hash',[email,username,passwordHash]);return {id:r.rows[0].id,email:r.rows[0].email,username:r.rows[0].username,passwordHash:r.rows[0].password_hash}}
+  async findUser(email:string):Promise<User|undefined>{const r=await this.pool.query('SELECT id,email,username,password_hash FROM users WHERE email=$1',[email]);return r.rowCount?{id:r.rows[0].id,email:r.rows[0].email,username:r.rows[0].username,passwordHash:r.rows[0].password_hash}:undefined}
   async defaultWatchlist(userId:string){const r=await this.pool.query("INSERT INTO watchlists(user_id,name) VALUES($1,'My watchlist') ON CONFLICT(user_id,name) DO UPDATE SET updated_at=watchlists.updated_at RETURNING id,name",[userId]);return r.rows[0]}
   async listWatchlists(userId:string){const r=await this.pool.query('SELECT id,name,created_at,updated_at FROM watchlists WHERE user_id=$1 ORDER BY created_at',[userId]);return r.rows}
   async createWatchlist(userId:string,name:string){const r=await this.pool.query('INSERT INTO watchlists(user_id,name) VALUES($1,$2) RETURNING id,name,created_at,updated_at',[userId,name]);return r.rows[0]}
